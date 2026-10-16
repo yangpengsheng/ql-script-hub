@@ -1,13 +1,13 @@
 """
-cron "39 12 * * *" script-path=xxx.py,tag=匹配cron用
+cron "39 12 * * *" script-path=恩山论坛签到.py,tag=匹配cron用
 new Env('恩山论坛签到')
 """
 
 import os
 import re
-import requests
 import random
 import time
+import requests
 from datetime import datetime
 
 # ---------------- 统一通知模块加载 ----------------
@@ -27,19 +27,16 @@ random_signin = os.getenv("RANDOM_SIGNIN", "true").lower() == "true"
 privacy_mode = os.getenv("PRIVACY_MODE", "true").lower() == "true"
 
 # 恩山论坛配置
-# 注意：right.com.cn 的路径大小写会影响可访问性；站点实际使用的是 /forum
 BASE_URL = 'https://www.right.com.cn/forum'
+FORUM_URL = f'{BASE_URL}/forum.php'
+SIGN_ACTION_URL = f'{BASE_URL}/plugin.php?id=erling_qd:action&action=sign'
+SIGN_PAGE_URL = f'{BASE_URL}/erling_qd-sign_in.html'
 
-# 积分页（用户信息）可能存在不同参数形式；按顺序尝试
+# 积分页候选（按顺序尝试）
 CREDIT_URLS = [
     f'{BASE_URL}/home.php?mod=spacecp&ac=credit',
     f'{BASE_URL}/home.php?mod=spacecp&ac=credit&showcredit=1',
-    # 兼容历史配置（部分环境里曾误写为 /FORUM）
-    'https://www.right.com.cn/FORUM/home.php?mod=spacecp&ac=credit',
-    'https://www.right.com.cn/FORUM/home.php?mod=spacecp&ac=credit&showcredit=1',
 ]
-
-CHECKIN_URL = f'{BASE_URL}/k_misign-sign.html'
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -50,6 +47,24 @@ HEADERS = {
     'Upgrade-Insecure-Requests': '1',
     'Cache-Control': 'max-age=0'
 }
+
+
+def is_captcha_page(text):
+    """阿里云ESA WAF滑块验证码页特征"""
+    if not text:
+        return False
+    return ('验证您是真人' in text
+            or 'aliyunCaptcha' in text
+            or '阿里云ESA' in text
+            or 'id="renderData"' in text)
+
+
+def is_xss_error_page(text):
+    """Discuz _xss_check 拦截页特征（formhash与会话不匹配时触发）"""
+    if not text:
+        return False
+    return '非法字符' in text or 'request_tainting' in text
+
 
 def mask_username(username):
     """用户名脱敏处理"""
@@ -65,6 +80,7 @@ def mask_username(username):
             return username[0] + '*' * 3 + username[-1]
     return username
 
+
 def format_time_remaining(seconds):
     """格式化时间显示"""
     if seconds <= 0:
@@ -77,6 +93,7 @@ def format_time_remaining(seconds):
         return f"{minutes}分{secs}秒"
     else:
         return f"{secs}秒"
+
 
 def wait_with_countdown(delay_seconds, task_name):
     """带倒计时的随机延迟等待"""
@@ -91,6 +108,7 @@ def wait_with_countdown(delay_seconds, task_name):
         time.sleep(sleep_time)
         remaining -= sleep_time
 
+
 def notify_user(title, content):
     """统一通知函数"""
     if hadsend:
@@ -102,12 +120,12 @@ def notify_user(title, content):
     else:
         print(f"📢 {title}\n📄 {content}")
 
+
 def parse_cookies(cookie_str):
-    """解析Cookie字符串，支持多账号"""
+    """解析Cookie字符串，支持多账号（换行或&&分隔）"""
     if not cookie_str:
         return []
 
-    # 先按换行符分割
     lines = cookie_str.strip().split('\n')
     cookies = []
 
@@ -115,15 +133,12 @@ def parse_cookies(cookie_str):
         line = line.strip()
         if not line:
             continue
-
-        # 再按&&分割
         parts = line.split('&&')
         for part in parts:
             part = part.strip()
             if part:
                 cookies.append(part)
 
-    # 去重并过滤空值
     unique_cookies = []
     for cookie in cookies:
         if cookie and cookie not in unique_cookies:
@@ -131,25 +146,27 @@ def parse_cookies(cookie_str):
 
     return unique_cookies
 
+
 def extract_number(text):
     """从文本中提取数字"""
     if not text:
         return 0
     try:
-        # 移除所有非数字字符，只保留数字
         number_str = re.sub(r'[^\d]', '', str(text))
         return int(number_str) if number_str else 0
     except (ValueError, TypeError):
         return 0
 
+
 def extract_first(text, patterns, default=None, flags=0):
-    """按顺序尝试正则，返回第一个匹配到的 group(1)（strip后）。"""
+    """按顺序尝试正则，返回第一个匹配到的 group(1)（strip后）"""
     for pattern in patterns:
         match = re.search(pattern, text, flags)
         if match:
             value = match.group(1)
             return value.strip() if isinstance(value, str) else value
     return default
+
 
 class EnShanSigner:
     name = "恩山论坛"
@@ -161,7 +178,6 @@ class EnShanSigner:
         self.session.headers.update(HEADERS)
         self.session.headers['Cookie'] = cookie
 
-        # 用户信息
         self.user_name = None
         self.user_group = None
         self.coin_before = None
@@ -171,187 +187,13 @@ class EnShanSigner:
         self.point_after = None
         self.formhash = None
         self.uid = None
-        self.sign_in_page_url = f"{BASE_URL}/erling_qd-sign_in.html"
-        self.sign_url = f"{BASE_URL}/plugin.php?id=erling_qd:action&action=sign"
 
     def _sync_cookie_header(self):
         self.session.headers['Cookie'] = self.cookie
 
     @staticmethod
-    def _rotl8(x, r):
-        x &= 0xFF
-        r &= 7
-        return ((x << r) & 0xFF) | (x >> (8 - r))
-
-    @staticmethod
-    def _rotr8(x, r):
-        x &= 0xFF
-        r &= 7
-        return (x >> r) | ((x << (8 - r)) & 0xFF)
-
-    @staticmethod
-    def _extract_oo(html):
-        match = re.search(r"oo\s*=\s*\[([^\]]+)\]", html)
-        if not match:
-            return None
-        tokens = re.findall(r"0x[0-9a-fA-F]+|\d+", match.group(1))
-        if not tokens:
-            return None
-        values = []
-        for token in tokens:
-            if token.lower().startswith("0x"):
-                values.append(int(token, 16))
-            else:
-                values.append(int(token))
-        return values
-
-    @staticmethod
-    def _extract_wi(html):
-        match = re.search(r'setTimeout\("\w+\((\d+)\)"', html)
-        if match:
-            return int(match.group(1))
-        match = re.search(r"\b\w+\((\d+)\)", html)
-        if match:
-            return int(match.group(1))
-        return None
-
-    @staticmethod
-    def _extract_loop1_params(html):
-        pattern = (
-            r"qo\s*=\s*(\d+);\s*do\{.*?oo\[qo\]=\(-oo\[qo\]\)&0xff;.*?"
-            r"oo\[qo\]=\(\(\(oo\[qo\]>>(\d+)\)\|\(\(oo\[qo\]<<(\d+)\)&0xff\)\)\-(\d+)\)&0xff;.*?"
-            r"\}\s*while\(--qo>=2\);"
-        )
-        match = re.search(pattern, html, re.S)
-        if not match:
-            return None
-        return {
-            "start": int(match.group(1)),
-            "shift_r": int(match.group(2)),
-            "shift_l": int(match.group(3)),
-            "sub": int(match.group(4)),
-        }
-
-    @staticmethod
-    def _extract_loop2_start(html):
-        match = re.search(
-            r"qo\s*=\s*(\d+);\s*do\s*\{[^}]*?oo\[qo\]\s*=\s*\(oo\[qo\]\s*-\s*oo\[qo\s*-\s*1\]\)\s*&\s*0xff;[^}]*?\}\s*while\s*\(\s*--\s*qo\s*>=\s*3\s*\)",
-            html,
-            re.S,
-        )
-        if not match:
-            return None
-        return int(match.group(1))
-
-    @staticmethod
-    def _extract_loop3_params(html):
-        block_match = re.search(
-            r"qo\s*=\s*1;\s*for\s*\(.*?\)\s*\{(.*?)\}\s*po\s*=",
-            html,
-            re.S,
-        )
-        if not block_match:
-            return None
-        block = block_match.group(1)
-
-        upper_match = re.search(r"qo\s*>\s*(\d+)\)\s*break", block)
-        if not upper_match:
-            return None
-        upper = int(upper_match.group(1))
-
-        assign_match = re.search(r"oo\[qo\]\s*=\s*(.+?);", block, re.S)
-        if not assign_match:
-            return None
-        expr = assign_match.group(1)
-
-        add_nums = re.findall(r"\+\s*(\d+)", expr)
-        if len(add_nums) < 2:
-            return None
-        add1 = int(add_nums[0])
-        add2 = int(add_nums[1])
-
-        shift_nums = re.findall(r"<<\s*(\d+)|>>\s*(\d+)", expr)
-        shifts = []
-        for left, right in shift_nums:
-            if left:
-                shifts.append(int(left))
-            if right:
-                shifts.append(int(right))
-        if len(shifts) < 2:
-            return None
-        rot_l = shifts[0]
-        return {
-            "upper": upper,
-            "add1": add1,
-            "add2": add2,
-            "rot_l": rot_l,
-        }
-
-    @staticmethod
-    def _extract_mod_skip(html):
-        match = re.search(r"qo\s*%\s*(\d+)", html)
-        if not match:
-            return 7
-        return int(match.group(1))
-
-    def _decode_po(self, oo_hex, wi, params):
-        oo = [b & 0xFF for b in oo_hex]
-        if len(oo) < 6:
-            return ""
-
-        last_index = len(oo) - 1
-        loop1_start = params["loop1_start"]
-        loop2_start = params["loop2_start"]
-        loop3_upper = params["loop3_upper"]
-        shift_r = params["shift_r"]
-        shift_l = params["shift_l"]
-        sub = params["sub"]
-        add1 = params["add1"]
-        add2 = params["add2"]
-        rot_l = params["rot_l"]
-        mod_skip = params["mod_skip"]
-
-        qo = min(loop1_start, last_index - 1)
-        while True:
-            oo[qo] = (-oo[qo]) & 0xFF
-            if (shift_r + shift_l) == 8:
-                oo[qo] = (self._rotr8(oo[qo], shift_r) - sub) & 0xFF
-            else:
-                oo[qo] = (((oo[qo] >> shift_r) | ((oo[qo] << shift_l) & 0xFF)) - sub) & 0xFF
-            qo -= 1
-            if qo < 2:
-                break
-
-        qo = min(loop2_start, last_index - 2)
-        while True:
-            oo[qo] = (oo[qo] - oo[qo - 1]) & 0xFF
-            qo -= 1
-            if qo < 3:
-                break
-
-        for qo in range(1, min(loop3_upper, last_index - 1) + 1):
-            x = (oo[qo] + add1) & 0xFF
-            x = (x + add2) & 0xFF
-            oo[qo] = self._rotl8(x, rot_l)
-
-        po_chars = []
-        for qo in range(1, last_index):
-            if qo % mod_skip != 0:
-                po_chars.append(chr((oo[qo] ^ (wi & 0xFF)) & 0xFF))
-        return "".join(po_chars)
-
-    @staticmethod
-    def _extract_cookie_kv(decoded_js):
-        match = re.search(r"document\.cookie=['\"]([^'\"]+)['\"]", decoded_js)
-        if not match:
-            return None
-        cookie_str = match.group(1).strip()
-        if not cookie_str:
-            return None
-        return cookie_str.split(';', 1)[0].strip()
-
-    @staticmethod
     def _upsert_cookie(base_cookies, new_cookie_kv):
+        """把新的 key=value 合并进 Cookie 字符串（同键替换，异键追加）"""
         if not new_cookie_kv or '=' not in new_cookie_kv:
             return base_cookies
         new_key, new_value = new_cookie_kv.split('=', 1)
@@ -375,178 +217,103 @@ class EnShanSigner:
             parts.append(f"{new_key}={new_value}")
         return '; '.join(parts)
 
-    @staticmethod
-    def _extract_formhash(html):
-        patterns = [
-            r'name="formhash"\s+value="([0-9a-fA-F]+)"',
-            r"member\.php\?mod=logging(?:&amp;|&)action=logout(?:&amp;|&)formhash=([0-9a-fA-F]+)",
-        ]
-        return extract_first(html, patterns=patterns, default=None, flags=re.S)
-
-    def _get_clearance_headers(self):
-        return {
-            'User-Agent': HEADERS['User-Agent'],
-            'Accept': (
-                'text/html,application/xhtml+xml,application/xml;q=0.9,'
-                'image/avif,image/webp,image/apng,*/*;q=0.8'
-            ),
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Pragma': 'no-cache',
-            'Cache-Control': 'no-cache',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-User': '?1',
-            'Sec-Fetch-Dest': 'document',
-            'Referer': self.sign_in_page_url,
-            'Cookie': self.cookie,
-        }
-
     def _merge_response_cookies(self, response):
+        """把响应 Set-Cookie 合并回请求 Cookie（如 WAF 下发的 acw_tc 等）"""
         for name, value in response.cookies.items():
             self.cookie = self._upsert_cookie(self.cookie, f"{name}={value}")
         self._sync_cookie_header()
 
-    def _refresh_clearance_cookie(self):
+    def _get(self, url, referer=None, timeout=20):
+        """统一 GET，返回 response 或 None"""
+        headers = dict(HEADERS)
+        if referer:
+            headers['Referer'] = referer
         try:
-            response = self.session.get(
-                self.sign_in_page_url,
-                headers=self._get_clearance_headers(),
-                timeout=30,
-                allow_redirects=True
-            )
+            resp = self.session.get(url=url, headers=headers, timeout=timeout, allow_redirects=True)
+            print(f"🔍 GET {url.split('/')[-1][:60]} -> {resp.status_code}")
+            return resp
         except Exception as e:
-            return False, f"获取签到页失败: {e}"
+            print(f"❌ GET 请求异常: {url} -> {e}")
+            return None
 
-        self._merge_response_cookies(response)
+    def check_session(self):
+        """GET forum.php：校验登录态并取 formhash / uid
 
-        if "oo" not in response.text:
-            formhash = self._extract_formhash(response.text)
-            if formhash:
-                self.formhash = formhash
-                return True, "已刷新签到参数"
-            return False, "签到页未提取到formhash"
+        返回 (ok, msg, stage)，stage 用于精确诊断：
+        captcha=被ESA验证码拦截 / guest=Cookie失效 / error=其他
+        """
+        print("🔐 正在校验登录态...")
+        resp = self._get(FORUM_URL, referer=FORUM_URL)
+        if resp is None:
+            return False, "论坛页请求失败（网络异常）", "error"
 
-        oo = self._extract_oo(response.text)
-        wi = self._extract_wi(response.text)
-        loop1 = self._extract_loop1_params(response.text)
-        loop2_start = self._extract_loop2_start(response.text)
-        loop3 = self._extract_loop3_params(response.text)
-        if not oo or wi is None or not loop1 or loop2_start is None or not loop3:
-            return False, "WAF挑战参数提取失败"
+        if is_captcha_page(resp.text):
+            return False, ("阿里云ESA滑块验证码拦截：连 forum.php 都被罩住，"
+                           "当前出口IP已被WAF标记，需更换青龙服务器出口IP或引入浏览器过盾方案"), "captcha"
 
-        params = {
-            "loop1_start": loop1["start"],
-            "loop2_start": loop2_start,
-            "loop3_upper": loop3["upper"],
-            "shift_r": loop1["shift_r"],
-            "shift_l": loop1["shift_l"],
-            "sub": loop1["sub"],
-            "add1": loop3["add1"],
-            "add2": loop3["add2"],
-            "rot_l": loop3["rot_l"],
-            "mod_skip": self._extract_mod_skip(response.text),
-        }
-        decoded_js = self._decode_po(oo, wi, params)
-        cookie_kv = self._extract_cookie_kv(decoded_js)
-        if not cookie_kv:
-            return False, "WAF解码后未找到cookie"
+        self._merge_response_cookies(resp)
 
-        self.cookie = self._upsert_cookie(self.cookie, cookie_kv)
-        self._sync_cookie_header()
+        formhash = extract_first(
+            resp.text,
+            patterns=[r'name="formhash"\s+value="([0-9a-fA-F]+)"'],
+            default=None,
+        )
+        uid_match = re.search(r"discuz_uid\s*=\s*'(\d+)'", resp.text)
+        uid = uid_match.group(1) if uid_match else None
 
-        try:
-            follow = self.session.get(
-                self.sign_in_page_url,
-                headers=self._get_clearance_headers(),
-                timeout=30,
-                allow_redirects=True
-            )
-        except Exception as e:
-            return False, f"WAF通过后重试签到页失败: {e}"
+        if not formhash:
+            return False, "论坛页未提取到formhash参数", "error"
 
-        self._merge_response_cookies(follow)
-        formhash = self._extract_formhash(follow.text)
-        if formhash:
-            self.formhash = formhash
-            return True, "已刷新WAF Cookie和formhash"
-        return False, "WAF通过后未提取到formhash"
+        if not uid or uid == '0':
+            return False, ("Cookie失效或未登录（discuz_uid=0）：请重新登录恩山论坛，"
+                           "F12复制完整Cookie后更新 enshan_cookie 环境变量"), "guest"
 
-    def daily_login(self):
-        """每日登录 - 获取formhash和uid"""
-        try:
-            print("🔐 正在登录获取参数...")
-            clearance_ok, clearance_msg = self._refresh_clearance_cookie()
-            if clearance_ok and self.formhash:
-                print(f"✅ 获取formhash成功: {self.formhash}")
-                return True, "登录成功"
-
-            print(f"⚠️ 签到页参数获取失败，回退forum页: {clearance_msg}")
-            url = f"{BASE_URL}/forum.php"
-            response = self.session.get(url, timeout=20)
-            print(f"🔍 登录响应状态码: {response.status_code}")
-            if response.status_code != 200:
-                return False, f"登录失败，状态码: {response.status_code}"
-
-            self._merge_response_cookies(response)
-            self.formhash = self._extract_formhash(response.text)
-            if self.formhash:
-                print(f"✅ 获取formhash成功: {self.formhash}")
-                uid_match = re.search(r"discuz_uid\s*=\s*'(\d+)'", response.text)
-                if uid_match:
-                    self.uid = uid_match.group(1)
-                    print(f"✅ 获取uid成功: {self.uid}")
-                return True, "登录成功"
-            return False, "未找到formhash参数"
-
-        except Exception as e:
-            return False, f"登录过程发生错误: {e}"
+        self.formhash = formhash
+        self.uid = uid
+        print(f"✅ 登录态正常: uid={uid}, formhash={formhash}")
+        return True, "登录成功", "ok"
 
     def get_user_info(self, is_after=False):
         """获取用户信息和积分"""
         try:
             print(f"👤 正在获取{'签到后' if is_after else '签到前'}用户信息...")
-
-            # 添加随机延迟
             time.sleep(random.uniform(2, 5))
 
-            # 部分情况下积分页会返回 521（源站/WAF/路径大小写导致），这里做重试并尝试多个候选URL
             response = None
             last_status = None
             for url in CREDIT_URLS:
                 for attempt in range(1, 4):
-                    headers = {
-                        **HEADERS,
-                        'Referer': f'{BASE_URL}/forum.php',
-                    }
-                    resp = self.session.get(url=url, headers=headers, timeout=20, allow_redirects=True)
+                    headers = dict(HEADERS)
+                    headers['Referer'] = FORUM_URL
+                    try:
+                        resp = self.session.get(url=url, headers=headers, timeout=20, allow_redirects=True)
+                    except Exception as e:
+                        print(f"❌ 积分页请求异常: {e}")
+                        break
                     last_status = resp.status_code
                     if resp.status_code == 200 and resp.text:
                         response = resp
                         break
-
-                    # 521/5xx/429 等临时性错误：短暂退避后重试
                     if resp.status_code in (429, 521) or 500 <= resp.status_code < 600:
                         time.sleep(1.5 * attempt + random.uniform(0, 0.8))
                         continue
-
-                    # 其他状态码通常不是临时问题，换下一个URL
                     break
                 if response is not None:
                     break
 
             if response is None:
                 error_msg = f"获取用户信息失败，状态码: {last_status}"
-                print(f"🔍 用户信息响应状态码: {last_status}")
                 print(f"❌ {error_msg}")
                 return False, error_msg
 
             print(f"🔍 用户信息响应状态码: {response.status_code}")
 
+            if is_captcha_page(response.text):
+                error_msg = "积分页被阿里云ESA验证码拦截（当前出口IP已被WAF标记）"
+                print(f"❌ {error_msg}")
+                return False, error_msg
+
             if response.status_code == 200:
-                # 提取积分信息
-                # 页面结构可能随主题变化，使用多套模式兜底
                 coin = extract_first(
                     response.text,
                     patterns=[
@@ -577,7 +344,6 @@ class EnShanSigner:
                     self.point_before = point
                     print(f"💰 签到前 - 恩山币: {coin}, 积分: {point}")
 
-                # 只在第一次获取用户名等信息
                 if not is_after:
                     self.user_name = extract_first(
                         response.text,
@@ -590,7 +356,6 @@ class EnShanSigner:
                         default="未知用户",
                         flags=re.S,
                     )
-
                     self.user_group = extract_first(
                         response.text,
                         patterns=[
@@ -600,7 +365,6 @@ class EnShanSigner:
                         default="未知等级",
                         flags=re.S,
                     )
-
                     self.contribution = extract_first(
                         response.text,
                         patterns=[
@@ -610,16 +374,15 @@ class EnShanSigner:
                         default="0",
                         flags=re.S,
                     )
-
                     print(f"👤 用户: {mask_username(self.user_name)}")
                     print(f"🏅 等级: {self.user_group}")
                     print(f"🎯 贡献: {self.contribution}")
 
                 return True, "用户信息获取成功"
-            else:
-                error_msg = f"获取用户信息失败，状态码: {response.status_code}"
-                print(f"❌ {error_msg}")
-                return False, error_msg
+
+            error_msg = f"获取用户信息失败，状态码: {response.status_code}"
+            print(f"❌ {error_msg}")
+            return False, error_msg
 
         except Exception as e:
             error_msg = f"获取用户信息异常: {str(e)}"
@@ -627,45 +390,57 @@ class EnShanSigner:
             return False, error_msg
 
     def perform_checkin(self):
-        """执行签到"""
-        try:
-            print("📝 正在执行签到...")
+        """执行签到
 
-            if not self.formhash:
-                login_ok, login_msg = self.daily_login()
-                if not login_ok:
-                    return False, f"请先执行登录获取formhash: {login_msg}"
+        注意：ESA WAF 会把 urlencoded POST body 合并进查询串，而 Discuz _xss_check
+        对查询串里的 formhash 与会话值做强校验，不匹配即返回503"非法字符"。
+        因此主请求把 formhash 放查询串；若仍被拦，回退 body 形式，并刷新 formhash 重试。
+        """
+        print("📝 正在执行签到...")
 
-            # 签到前再刷新一次，降低WAF过期导致的失败
-            self._refresh_clearance_cookie()
+        if not self.formhash:
+            ok, msg, _stage = self.check_session()
+            if not ok:
+                return False, f"请先校验登录态获取formhash: {msg}"
 
-            headers = {
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": "https://www.right.com.cn",
-                "Referer": self.sign_in_page_url,
-                "Cookie": self.cookie,
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Pragma": "no-cache",
-                "Cache-Control": "no-cache",
-            }
+        headers = {
+            "User-Agent": HEADERS["User-Agent"],
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": SIGN_PAGE_URL,
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache",
+        }
 
-            data = {"formhash": self.formhash}
+        attempts = [
+            ("查询串", lambda: self.session.get(f"{SIGN_ACTION_URL}&formhash={self.formhash}", headers=headers, timeout=30)),
+            ("请求体", lambda: self.session.post(SIGN_ACTION_URL, headers={**headers, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}, data={"formhash": self.formhash}, timeout=30)),
+        ]
 
-            response = self.session.post(self.sign_url, headers=headers, data=data, timeout=30)
-            print(f"🔍 签到响应状态码: {response.status_code}")
-            response.raise_for_status()
+        last_err = "未知错误"
+        for name, do_request in attempts:
+            try:
+                response = do_request()
+            except Exception as e:
+                last_err = f"签到请求异常: {e}"
+                print(f"❌ {last_err}")
+                continue
+
+            print(f"🔍 签到响应({name})状态码: {response.status_code}")
+
+            if is_captcha_page(response.text):
+                return False, "签到动作接口被阿里云ESA验证码拦截，当前出口IP已被WAF标记，需更换青龙服务器出口IP或引入浏览器过盾方案"
+
+            if is_xss_error_page(response.text):
+                last_err = f"Discuz _xss_check 拦截（{name}形式，formhash与会话不匹配）"
+                print(f"⚠️ {last_err}")
+                continue
 
             try:
                 result = response.json()
             except ValueError:
-                result = {"message": response.text}
+                return False, f"签到响应非JSON: {response.text[:200]}"
 
             if isinstance(result, dict):
                 message = str(result.get("message", "")).strip()
@@ -682,8 +457,31 @@ class EnShanSigner:
                     return False, f"签到失败: {message}"
             return True, "签到请求已提交"
 
-        except Exception as e:
-            return False, f"签到异常: {str(e)}"
+        # 两种形式都被 _xss_check 拦截：formhash 可能已过期，刷新后重试一次
+        print("🔄 formhash 可能已过期，刷新后重试...")
+        ok, msg, _stage = self.check_session()
+        if ok and self.formhash:
+            try:
+                response = self.session.get(f"{SIGN_ACTION_URL}&formhash={self.formhash}", headers=headers, timeout=30)
+                print(f"🔍 签到响应(重试)状态码: {response.status_code}")
+                if is_captcha_page(response.text):
+                    return False, "签到动作接口被阿里云ESA验证码拦截，当前出口IP已被WAF标记"
+                if not is_xss_error_page(response.text):
+                    try:
+                        result = response.json()
+                    except ValueError:
+                        return False, f"签到响应非JSON: {response.text[:200]}"
+                    if isinstance(result, dict):
+                        message = str(result.get("message", "")).strip()
+                        if "已签到" in message or "成功" in message:
+                            return True, message
+                        if message:
+                            return False, f"签到失败: {message}"
+                    return True, "签到请求已提交"
+            except Exception as e:
+                last_err = f"重试异常: {e}"
+
+        return False, last_err
 
     def main(self):
         """主执行函数"""
@@ -703,29 +501,31 @@ class EnShanSigner:
             print(f"❌ {error_msg}")
             return error_msg, False
 
-        # 1. 获取签到前用户信息
-        login_success, login_msg = self.daily_login()
+        # 1. 校验登录态并取 formhash
+        login_success, login_msg, stage = self.check_session()
         if not login_success:
+            print(f"❌ 登录态校验失败[{stage}]: {login_msg}")
             return f"登录失败: {login_msg}", False
+
+        # 2. 获取签到前用户信息
         user_success, user_msg = self.get_user_info(is_after=False)
         if not user_success:
             print(f"⚠️ 获取用户信息失败: {user_msg}")
 
-        # 2. 随机等待
+        # 3. 随机等待
         time.sleep(random.uniform(2, 5))
 
-        # 3. 执行签到
+        # 4. 执行签到
         signin_success, signin_msg = self.perform_checkin()
 
-        # 4. 获取签到后用户信息
+        # 5. 获取签到后用户信息
         time.sleep(random.uniform(2, 4))
         after_success, after_msg = self.get_user_info(is_after=True)
 
-        # 5. 通过积分变化判断签到是否真的成功
+        # 6. 通过积分变化判断签到是否真的成功
         gain_info = ""
         if after_success and self.coin_before and self.coin_after:
             try:
-                # 修复：清理数据，移除"币"等文字，只保留数字
                 coin_before = extract_number(self.coin_before)
                 coin_after = extract_number(self.coin_after)
                 point_before = extract_number(self.point_before)
@@ -742,7 +542,6 @@ class EnShanSigner:
                     gain_info = f"\n🎁 本次收益: +{coin_gain} 恩山币, +{point_gain} 积分"
                     print(f"✅ 通过积分变化确认签到成功: +{coin_gain} 恩山币, +{point_gain} 积分")
                 elif coin_gain == 0 and point_gain == 0:
-                    # 积分没变化，可能已经签到过了
                     signin_success = True
                     signin_msg = "今日已签到（积分无变化）"
                     print("📅 积分无变化，今日已签到")
@@ -752,10 +551,9 @@ class EnShanSigner:
 
             except Exception as e:
                 print(f"⚠️ 积分变化计算异常: {e}")
-                # 如果积分计算失败，使用原始签到结果
                 print("🔄 使用原始签到结果")
 
-        # 6. 组合结果消息
+        # 7. 组合结果消息
         final_msg = f"""🌟 恩山论坛签到结果
 
     👤 用户: {mask_username(self.user_name) or '未知用户'}
@@ -770,21 +568,18 @@ class EnShanSigner:
         print(f"{'✅ 任务完成' if signin_success else '❌ 任务失败'}")
         return final_msg, signin_success
 
+
 def main():
     """主程序入口"""
     print(f"==== 恩山论坛签到开始 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ====")
-
-    # 显示配置状态
     print(f"🔒 隐私保护模式: {'已启用' if privacy_mode else '已禁用'}")
 
-    # 随机延迟（整体延迟）
     if random_signin:
         delay_seconds = random.randint(0, max_random_delay)
         if delay_seconds > 0:
             print(f"🎲 随机延迟: {format_time_remaining(delay_seconds)}")
             wait_with_countdown(delay_seconds, "恩山论坛签到")
 
-    # 获取Cookie配置
     if not enshan_cookie:
         error_msg = """❌ 未找到enshan_cookie环境变量
 
@@ -803,7 +598,6 @@ def main():
         notify_user("恩山论坛签到失败", error_msg)
         return
 
-    # 使用Cookie解析函数
     cookies = parse_cookies(enshan_cookie)
 
     if not cookies:
@@ -828,13 +622,11 @@ def main():
 
     for index, cookie in enumerate(cookies):
         try:
-            # 账号间随机等待
             if index > 0:
                 delay = random.uniform(10, 20)
                 print(f"⏱️  随机等待 {delay:.1f} 秒后处理下一个账号...")
                 time.sleep(delay)
 
-            # 执行签到
             signer = EnShanSigner(cookie, index + 1)
             result_msg, is_success = signer.main()
 
@@ -848,7 +640,6 @@ def main():
                 'username': mask_username(signer.user_name) if signer.user_name else f"账号{index + 1}"
             })
 
-            # 发送单个账号通知
             status = "成功" if is_success else "失败"
             title = f"恩山论坛账号{index + 1}签到{status}"
             notify_user(title, result_msg)
@@ -858,7 +649,6 @@ def main():
             print(f"❌ {error_msg}")
             notify_user(f"恩山论坛账号{index + 1}签到失败", error_msg)
 
-    # 发送汇总通知
     if total_count > 1:
         summary_msg = f"""📊 恩山论坛签到汇总
 
@@ -868,7 +658,6 @@ def main():
 📊 成功率: {success_count/total_count*100:.1f}%
 ⏰ 完成时间: {datetime.now().strftime('%m-%d %H:%M')}"""
 
-        # 添加详细结果（最多显示5个账号的详情）
         if len(results) <= 5:
             summary_msg += "\n\n📋 详细结果:"
             for result in results:
@@ -879,9 +668,11 @@ def main():
 
     print(f"\n==== 恩山论坛签到完成 - 成功{success_count}/{total_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ====")
 
+
 def handler(event, context):
     """云函数入口"""
     main()
+
 
 if __name__ == "__main__":
     main()
